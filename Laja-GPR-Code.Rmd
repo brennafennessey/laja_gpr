@@ -1,0 +1,1410 @@
+---
+title: "Laja-GPR-Code"
+author: "Brenna Fennessey"
+date: "2025-03-12"
+output: html_document
+---
+
+For additional clarification on provided code - first see the original RGPR package (https://emanuelhuber.github.io/RGPR/) or email "brennafennessey@ufl.edu"
+
+You will have to download and unzip the Laja survey grid files in the GitHub repository (i.e., Laja_G1, Laja_G2, etc.). 
+
+# Load and Edit Required Packages 
+```{r Load Packages}
+#install.packages("RGPR")
+
+library(RGPR)
+```
+```{r Running RGPR Functions in Local Environment}
+#no changes to functions from RGPR package
+
+safeName <- function(x, y){
+  xold <- x
+  k <- 1
+  while(any(x == y)){
+    x <- paste0(xold, "_", k)
+    k <- k + 1
+  }
+  return(x)
+}
+
+.readSEG2 <- function(x, fName = character(0), desc = character(0),
+                      fPath = character(0), Vmax = NULL, ext = ""){
+  if(is.null(Vmax)) Vmax <- 50
+  
+  ntr <- dim(x$data)[2]
+  nspl <- dim(x$data)[1]
+  nset <- dim(x$data)[3]
+  
+  # find SAMPLING_INTERVAL or SAMPLE_INTERVAL or SPR_SAMPLING_INTERVAL
+  sel <- grepl("(SAMPL)(.+)(_INTERVAL)", x$HD$strings)
+  ddt <- extractPattern(x$HD$strings[sel], pat = "(?<dt>[0-9]+)")
+  data_dt <- 0.4 # ns default
+  if(length(ddt) && ddt != ""){
+    ddt <- as.numeric(ddt)
+    if(!is.na(ddt)){
+      data_dt <- ddt / 1000 # ns
+    }
+  }
+  
+  # find date yyyy/mm/dd or mm/dd/yyyy or mm/dd/yy or yy/mm/dd or yy-mm-dd, etc.
+  sel <- grepl("([0-9]{2}|[0-9]{4})[/|-]([0-9]{2})[/|-]([0-9]{2}|[0-9]{4})", x$HD$strings)
+  ddate <- extractPattern(x$HD$strings[sel], pat = "(?<date>[0-9]{2}[/|-][0-9]{2}[/|-][0-9]{2})")
+  data_date <- format(Sys.time(), "%Y-%m-%d")   # default
+  if(length(ddate) > 0){
+    ddate <- as.Date(ddate, "%m/%d/%y")  # c("%Y-%m-%d", "%Y/%m/%d")
+    if(!is.na(ddate)){
+      data_date <- format(ddate, "%Y-%m-%d")
+    }
+  }
+  
+  # find time hh:mm:ss
+  sel <- grepl("([0-9]{2})[:]([0-9]{2})[:]([0-9]{2})", x$HD$strings)
+  dtime <- extractPattern(x$HD$strings[sel], pat = "(?<TIME>[0-9]{2}[:][0-9]{2}[:][0-9]{2})")
+  data_time <- as.double(as.POSIXct(data_date,   origin = as.Date(data_date))) + seq_len(ntr)
+  if(length(dtime) > 0){
+    traceTime <- as.double(as.POSIXct(paste0(data_date, " ", dtime),   origin = as.Date(data_date)))
+    if(!is.na(traceTime)){
+      data_time <- traceTime  + seq_len(ntr)
+    }
+  }
+  
+  #--- dx spacing
+  # 1. search for the triger mode -> key word
+  sel <- grepl("TRIGGER(.+)MODE", x$HD$strings)
+  spmode <- extractPattern(x$HD$strings[sel], pat = "MODE(?<ID>.+)")
+  # 2. use the key word to find the dx spacing
+  sel <- grepl(paste0(trimStr(spmode), "(.+)INTERVAL"), x$HD$strings)
+  dx <- as.numeric(strsplit(x$HD$strings[sel], " ")[[1]][2])
+  
+  # Byte value    Data format
+  # 01            16-bit fixed point      
+  # 02            32-bit fixed point      
+  # 03            20-bit floating point (SEG convention)      
+  # 04            32-bit floating point (IEEE standard)      
+  # 05            64-bit floating point (IEEE standard) 
+  if(x$THD$dataFormatCode == 1){
+    nbits <- 16
+  }else if(x$THD$dataFormatCode == 2){
+    nbits <- 32
+  }else if(x$THD$dataFormatCode == 3){
+    nbits <- 20
+  }else if(x$THD$dataFormatCode == 4){
+    nbits <- 32
+  }else if(x$THD$dataFormatCode == 5){
+    nbits <- 64
+  }else{
+    16
+  }
+  
+  antfreq <- 0
+  message("Antenna frequency set to 0 MHz. Set it with 'antfreq(x) <- ... '")
+  antsep <- 0
+  message("Antenna separation set to 0 ", "m", 
+          ". Set it with 'antsep(x) <- ... '")
+  
+  if(nset == 1){
+    if(length(dim(x$data)) == 3) x$data <- x$data[,,1]
+    y <- new("GPR",   
+             version      = "0.2",
+             data        = bits2volt(Vmax = Vmax, nbits = nbits) * x$data,
+             traces      = seq_len(ntr),
+             fid         = rep("", ntr),
+             coord       = matrix(nrow = 0, ncol = 3),
+             pos         = seq(from = 0, by = dx, length.out = ntr),
+             depth       = seq(from = 0, by = data_dt, length.out = nspl),
+             rec         = matrix(nrow = 0, ncol = 3),
+             trans       = matrix(nrow = 0, ncol = 3),
+             time0       = rep(0, ntr),
+             time        = data_time,
+             proc        = character(0),
+             vel         = list(v = 0.1),
+             name        = fName,
+             description = desc,
+             filepath    = fPath,
+             dz          = data_dt, 
+             dx          = dx,
+             depthunit   = "ns",
+             posunit     = "m",
+             freq        = antfreq, 
+             antsep      = antsep,     # check
+             surveymode  = "reflection",
+             date        = data_date,
+             crs         =  character(0),
+             hd          = c(x$HD, x$THD)
+    )
+  }else{
+    message("I return a GPR set = a 3D object with all antenna data.\n",
+            "To extract for example the 2nd data set, do 'x[,,2].")
+    if(length(ext) ==  nset){
+      set_names <- paste0(fName, ".", ext)
+    }else{
+      set_names <-  paste("antenna", seq_len(nset))
+    }
+    y <- new("GPRset",   
+             version      = "0.2",
+             data        = bits2volt(Vmax = Vmax, nbits = nbits) * x$data,
+             traces      = seq_len(ntr),
+             fid         = rep("", ntr),
+             coord       = matrix(nrow = 0, ncol = 3),
+             pos         = seq(0, dx, length.out = ntr),
+             depth       = seq(0, by = data_dt, length.out = nspl),
+             rec         = matrix(nrow = 0, ncol = 3),
+             trans       = matrix(nrow = 0, ncol = 3),
+             time0       = rep(0, ntr),
+             time        = data_time,
+             proc        = character(0),
+             vel         = list(v = 0.1),
+             name        = fName,
+             description = desc,
+             filepath    = fPath,
+             dz          = data_dt, 
+             dx          = dx,
+             depthunit   = "ns",
+             posunit     = "m",
+             freq        = antfreq, 
+             antsep      = antsep,     # check
+             surveymode  = "reflection",
+             date        = data_date,
+             crs         =  character(0),
+             hd          = c(x$HD, x$THD),
+             setnames    = set_names,
+             sets        = seq_len(nset),
+             setunit     = rep("", nset)
+    )
+  }
+  return(y)
+}
+```
+```{r Rewriting GPRsurvey Function}
+#Only difference from original RGPR is that line length is multiplied by 1.543 to account for uncalibrated wheel
+
+GPRsurvey_BMF <- function (LINES, verbose = TRUE, ...) 
+{
+  n <- length(LINES)
+  line_filepaths <- character(n)
+  line_names <- character(n)
+  line_descriptions <- character(n)
+  line_surveymodes <- character(n)
+  line_dates <- character(n)
+  line_freq <- numeric(n)
+  line_antsep <- numeric(n)
+  line_lengths <- numeric(n)
+  line_posunits <- character(n)
+  line_crs <- character(n)
+  xyzCoords <- list()
+  line_fids <- list()
+  line_traces <- integer(n)
+  line_nz <- integer(n)
+  line_dz <- integer(n)
+  line_depthunits <- character(n)
+  it <- 0
+  for (i in seq_along(LINES)) {
+    if (isFALSE(file.exists(LINES[[i]]))) {
+      warning(paste0("The file \"", LINES[[i]], "\" does not exist!\n", 
+                     "I skip it!"))
+      next
+    }
+    it <- it + 1
+    gpr <- RGPR::readGPR(LINES[[i]], verbose = verbose, ...)
+    line_filepaths[it] <- LINES[[i]]
+    line_traces[it] <- ncol(gpr)
+    line_nz[it] <- nrow(gpr)
+    line_dz[it] <- mean(diff(gpr@depth))
+    line_names[it] <- name(gpr)[1]
+    if (line_names[it] == "") {
+      line_names[it] <- "default_name"
+    }
+    if (it > 1) {
+      line_names[it] <- safeName(x = line_names[it], y = line_names[1:(it - 
+                                                                         1)])
+    }
+    line_descriptions[it] <- description(gpr)
+    line_surveymodes[it] <- gpr@surveymode
+    if (length(gpr@date) == 0) {
+      line_dates[it] <- NA
+    }
+    else {
+      line_dates[it] <- gpr@date
+    }
+    if (length(gpr@freq) == 0) {
+      line_freq[it] <- NA
+    }
+    else {
+      line_freq[it] <- gpr@freq
+    }
+    if (length(gpr@antsep) == 0) {
+      line_antsep[it] <- NA
+    }
+    else {
+      line_antsep[it] <- gpr@antsep
+    }
+    line_posunits[it] <- gpr@posunit
+    line_depthunits[it] <- gpr@depthunit
+    line_crs[it] <- ifelse(length(gpr@crs) > 0, gpr@crs[1], 
+                           character(1))
+    if (length(gpr@coord) > 0) {
+      xyzCoords[[line_names[it]]] <- gpr@coord
+      colnames(xyzCoords[[line_names[it]]]) <- c("x", "y", 
+                                                 "z")
+      line_lengths[it] <- RGPR::posLine(gpr@coord[, 1:2], last = TRUE)
+    }
+    else {
+      line_lengths[it] <- gpr@dx * ncol(gpr@data)
+    }
+    line_fids[[line_names[it]]] <- RGPR::trimStr(gpr@fid)
+  }
+  line_filepaths <- line_filepaths[1:it]
+  line_names <- line_names[1:it]
+  line_descriptions <- line_descriptions[1:it]
+  line_surveymodes <- line_surveymodes[1:it]
+  line_dates <- line_dates[1:it]
+  line_freq <- line_freq[1:it]
+  line_antsep <- line_antsep[1:it]
+  line_lengths <- line_lengths[1:it]
+  line_posunits <- line_posunits[1:it]
+  line_crs <- line_crs[1:it]
+  line_traces <- line_traces[1:it]
+  line_nz <- line_nz[1:it]
+  line_dz <- line_dz[1:it]
+  line_depthunits <- line_depthunits[1:it]
+  if (length(unique(line_posunits)) > 1) {
+    warning("Position units are not identical: \n", paste0(unique(line_posunits), 
+                                                           collaspe = ", "), "!")
+  }
+  if (length(unique(line_depthunits)) > 1) {
+    warning("Depth units are not identical: \n", paste0(unique(line_depthunits), 
+                                                        collaspe = ", "), "!\n")
+  }
+  if (length(unique(line_crs)) > 1) {
+    warning("Not all the coordinate reference systems are identica: \n", 
+            paste0(unique(line_crs), collaspe = ", "), "!\n")
+  }
+  x <- new("GPRsurvey", version = "0.1", filepaths = line_filepaths, 
+           names = line_names, descriptions = line_descriptions, 
+           freqs = line_freq, lengths = line_lengths*1.543, surveymodes = line_surveymodes, 
+           dates = line_dates, antseps = line_antsep, posunits = line_posunits, 
+           crs = line_crs, coords = xyzCoords, fids = line_fids, 
+           intersections = list(), ntraces = line_traces, nz = line_nz, 
+           dz = line_dz, zunits = line_depthunits)
+  x <- setCoordref(x)
+  return(x)
+}
+
+#no changes to this code - just running in local environment
+getFPath <- function(x){
+  if(inherits(x, "connection")){
+    summaryCon <- summary.connection(x)
+    return( summaryCon$description )
+  }else{
+    return(x)
+  }
+}
+```
+```{r Rewriting readGPR function}
+#Only difference from original RGPR is that line length is multiplied by 1.543 to account for uncalibrated wheel
+
+readGPR_BMF <- function (dsn, desc = "", dsn2 = NULL, format = NULL, Vmax = NULL, 
+          fPath, ch = 1, verbose = TRUE, interp_pos = TRUE, toUTM = TRUE, 
+          method = c("linear", "linear", "linear"), endian = .Platform$endian) 
+{
+  if (!missing(fPath)) {
+    if (missing(dsn)) {
+      dsn <- fPath
+    }
+    warning("Argument 'fPath' is deprecated. Use instead ", 
+            "'dsn' (data source name)")
+  }
+  if (!is.null(dsn2)) {
+    warning("Argument 'dsn2' is deprecated. Use instead ", 
+            "'dsn = list(dsn1, dsn2)")
+  }
+  dsn <- Filter(Negate(is.null), dsn)
+  fPath <- sapply(dsn, getFPath, USE.NAMES = FALSE)
+  ext <- sapply(fPath, .fExt, USE.NAMES = FALSE)
+  fName <- sapply(fPath, .fNameWExt, USE.NAMES = FALSE)
+  if (!is.list(dsn)) 
+    dsn <- as.list(dsn)
+  names(dsn) <- toupper(ext)
+  names(fName) <- toupper(ext)
+  names(fPath) <- toupper(ext)
+  if ("DT1" %in% toupper(ext)) {
+    if (length(dsn) == 1) {
+      if (inherits(dsn, "connection")) {
+        stop("Please add an additional connection to 'dsn' in 'readGPR()' for ", 
+             "the header file '*.hd'")
+      }
+      dsn <- list(DT1 = getFName(fPath[1], ext = ".DT1")$dt1, 
+                  HD = getFName(fPath[1], ext = ".HD")$hd, GPS = getFName(fPath[1], 
+                                                                          ext = ".GPS", throwError = FALSE)$gps)
+    }
+    else if (!("HD" %in% toupper(ext))) {
+      stop("Missing connection or filepath to '*.hd' file.")
+    }
+    else if (!("GPS" %in% toupper(ext))) {
+      dsn <- list(DT1 = dsn[["DT1"]], HD = dsn[["HD"]], 
+                  GPS = getFName(fPath[1], ext = ".GPS", throwError = FALSE)$gps)
+    }
+    hd <- verboseF(readHD(dsn[["HD"]]), verbose = verbose)
+    dt1 <- verboseF(readDT1(dsn[["DT1"]]), verbose = verbose)
+    x <- verboseF(.gprDT1(list(hd = hd$HD, dt1 = dt1$dt1hd, 
+                               data = dt1$data), fName = fName[["DT1"]], fPath = fPath[["DT1"]], 
+                          desc = desc, Vmax = Vmax), verbose = verbose)
+    if (!is.null(dsn[["GPS"]]) && isTRUE(interp_pos)) {
+      x <- tryCatch({
+        gps <- verboseF(readGPS(dsn[["GPS"]], toUTM = toUTM), 
+                        verbose = verbose)
+        if (!is.null(gps)) {
+          x <- interpPos(x, gps$mrk, tol = sqrt(.Machine$double.eps), 
+                         method = method)
+          crs(x) <- gps$crs
+        }
+        return(x)
+      }, error = function(cond) {
+        message("I could neither read your GPS data ", 
+                "nor interpolate the trace position.")
+        return(x)
+      })
+    }
+  }
+  else if (any(c("SEG2", "SG2") %in% toupper(ext))) {
+    i <- which(grepl("SEG2|SG2", toupper(ext)))[1]
+    dsn <- list(SG2 = dsn[[i]], GPS = getFName(fPath[1], 
+                                               ext = ".GPS", throwError = FALSE)$gps)
+    if (!is.null(dsn[["GPR"]])) {
+      warning("Reading of GPS data for SEG2 files not yet implemented.\n", 
+              "Please contact me: emanuel.huber@pm.me")
+    }
+    A <- verboseF(readSEG2(dsn = dsn[["SG2"]]))
+    x <- verboseF(.readSEG2(A))
+  }
+  else if (any(c("RA1", "RA2", "RAD") %in% toupper(ext))) {
+    USRExt <- c("RA1", "RA2", "RAD")
+    tst <- USRExt %in% toupper(ext)
+    dsn <- list(USRADAR = dsn[USRExt[tst][1]], GPS = getFName(fPath[1], 
+                                                              ext = ".GPS", throwError = FALSE)$gps)
+    A <- verboseF(readSEG2(dsn = dsn[["USRADAR"]]))
+    x <- verboseF(.readSEG2(A, fName = fName[[1]], fPath = fPath[[1]], 
+                            desc = desc, Vmax = Vmax, ext = names(dsn$USRADAR)))
+    if (!is.null(dsn[["GPS"]])) {
+      x <- tryCatch({
+        gps <- verboseF(readGPSUSRADAR(dsn[["GPS"]], 
+                                       toUTM = toUTM), verbose = verbose)
+        if (!is.null(gps) && isTRUE(interp_pos)) {
+          x <- interpPos(x, gps$mrk, tol = sqrt(.Machine$double.eps), 
+                         method = method)
+          crs(x) <- gps$crs
+        }
+        return(x)
+      }, error = function(cond) {
+        message("I could neither read your GPS data ", 
+                "nor interpolate the trace position.")
+        return(x)
+      })
+    }
+  }
+  else if (any(c("RD3", "RD7") %in% toupper(ext))) {
+    if (length(dsn) == 1) {
+      if (inherits(dsn, "connection")) {
+        stop("Please add an additional connection to 'dsn' in 'readGPR()' for ", 
+             "the header file '*.rad'")
+      }
+      dsn <- list(RD37 = getFName(fPath[1], ext = paste0(".", 
+                                                         toupper(ext)))[[tolower(ext)]], RAD = getFName(fPath[1], 
+                                                                                                        ext = ".RAD")$rad, COR = getFName(fPath[1], ext = ".COR", 
+                                                                                                                                          throwError = FALSE)$cor)
+    }
+    else if (!("RAD" %in% toupper(ext))) {
+      stop("Missing connection or filepath to '*.rad' file.")
+    }
+    else if (!("COR" %in% toupper(ext))) {
+      dsn[["COR"]] <- getFName(fPath[1], ext = ".COR", 
+                               throwError = FALSE)$cor
+    }
+    nbytes <- 4
+    i <- which("RD7" == toupper(ext))
+    if (length(i) == 0) {
+      i <- which("RD3" == toupper(ext))
+      nbytes <- 2
+    }
+    dsn[["RD37"]] <- dsn[[i]]
+    rad <- verboseF(readRAD(dsn[["RAD"]]), verbose = verbose)
+    rd37 <- verboseF(readRD37(dsn[["RD37"]], ntr = rad$ntr, 
+                              npt = rad$npt, nbytes = nbytes), verbose = verbose)
+    x <- verboseF(.gprRD3(list(hd = rad$HD, data = rd37), 
+                          fName = fName[[i]], fPath = fPath[[i]], desc = desc, 
+                          nbits = 8 * nbytes, Vmax = Vmax), verbose = verbose)
+    if (!is.null(dsn[["COR"]])) {
+      x <- tryCatch({
+        gps <- verboseF(readCOR(dsn[["COR"]], toUTM = toUTM), 
+                        verbose = verbose)
+        if (!is.null(gps) && isTRUE(interp_pos)) {
+          x <- interpPos(x, gps$mrk, tol = sqrt(.Machine$double.eps), 
+                         method = method)
+          crs(x) <- gps$crs
+        }
+        return(x)
+      }, error = function(cond) {
+        message("I could neither read your GPS data ", 
+                "nor interpolate the trace position.")
+        return(x)
+      })
+    }
+  }
+  else if ("DT" %in% toupper(ext)) {
+    if (length(dsn) == 1) {
+      dsn <- list(DT = dsn[["DT"]], GEC = getFName(fPath[1], 
+                                                   ext = ".GEC", throwError = FALSE)$gec)
+    }
+    else {
+      if (!("GEC" %in% toupper(ext))) {
+        dsn <- c(dsn, list(GEC = getFName(fPath[1], ext = ".GEC", 
+                                          throwError = FALSE)$gec))
+      }
+    }
+    y <- verboseF(readDT(dsn[["DT"]]), verbose = verbose)
+    x <- verboseF(.gprDT(y, fName = fName[["DT"]], fPath = fPath[["DT"]], 
+                         desc = desc, Vmax = Vmax), verbose = verbose)
+    if (!is.null(dsn[["GEC"]]) && isTRUE(interp_pos)) {
+      x <- tryCatch({
+        x_mrk <- verboseF(readGEC(dsn[["GEC"]]), verbose = verbose)
+        x <- interpPos(x, x_mrk, tol = sqrt(.Machine$double.eps), 
+                       method = method)
+        crs(x) <- paste0("+init=epsg:32635 +proj=utm +zone=", 
+                         x_mrk[1, "crs"], " +datum=WGS84 +units=m +no_defs## +ellps=WGS84 +towgs84=0,0,0")
+        x
+      }, error = function(cond) {
+        message("I could neither read your GPS data ", 
+                "nor interpolate the trace position.")
+        return(x)
+      })
+    }
+  }
+  else if ("SGPR" %in% toupper(ext)) {
+    y <- verboseF(readSGPR(dsn[["SGPR"]]), verbose = verbose)
+    x <- verboseF(.gprSGPR(y, fName = fName[["SGPR"]], fPath = fPath[["SGPR"]], 
+                           desc = desc, Vmax = Vmax), verbose = verbose)
+  }
+  else if (any(c("SGY", "SEGY") %in% toupper(ext))) {
+    i <- which(grepl("SGY|SEGY", toupper(ext)))[1]
+    dsn <- dsn[[i]]
+    ndn <- c("little", "big")
+    A <- tryCatch({
+      verboseF(readSGY(dsn, ENDIAN = endian), verbose = verbose)
+    }, error = function(cond) {
+      return(NULL)
+    })
+    if (is.null(A)) {
+      A <- tryCatch({
+        verboseF(readSGY(dsn, ENDIAN = ndn[ndn != endian]), 
+                 verbose = verbose)
+      }, error = function(cond) {
+        return(NULL)
+      })
+    }
+    if (is.null(A)) {
+      stop()
+    }
+    x <- verboseF(.gprSGY(A, fName = fName, fPath = fPath, 
+                          desc = desc, Vmax = Vmax), verbose = verbose)
+    if (isTRUE(interp_pos)) {
+      if (inherits(x, "GPR") && !is.null(x@hd$xyz)) {
+        if (nrow(x@hd$xyz) == ncol(x)) {
+          test <- !duplicated(x@hd$xyz[, 1:2])
+          if (sum(test) > 0) {
+            x <- x[, test]
+            x@coord <- x@hd$xyz[test, ]
+            x@pos <- posLine(x@hd$xyz[test, 1:2])
+            x@dx <- mean(diff(x@pos)) 
+          }
+        }
+        else {
+          message("I found some coordinates!\n", "Check them with 'gethd(x)$xyz'...")
+        }
+      }
+    }
+    return(x)
+  }
+  else if ("IPRB" %in% toupper(ext)) {
+    if (length(dsn) == 1) {
+      if (inherits(dsn, "connection")) {
+        stop("Please add an additional connection to 'dsn' in 'readGPR()' for ", 
+             "the header file '*.iprh'")
+      }
+      dsn <- list(IPRB = getFName(fPath[1], ext = ".iprb")$iprb, 
+                  IPRH = getFName(fPath[1], ext = ".iprh")$iprh, 
+                  COR = getFName(fPath[1], ext = ".cor", throwError = FALSE)$cor, 
+                  TIME = getFName(fPath[1], ext = ".time", throwError = FALSE)$time, 
+                  MRK = getFName(fPath[1], ext = ".mrk", throwError = FALSE)$mrk)
+    }
+    else if (!("IPRH" %in% toupper(ext))) {
+      stop("Missing connection or filepath to '*.iprh' file.")
+    }
+    else {
+      dsn <- list(IPRB = dsn[["IPRB"]], IPRH = dsn[["IPRH"]])
+      if (!("COR" %in% toupper(ext))) {
+        dsn <- c(dsn, list(COR = getFName(fPath[1], ext = ".cor", 
+                                          throwError = FALSE)$cor))
+      }
+      if (!("TIME" %in% toupper(ext))) {
+        dsn <- c(dsn, list(TIME = getFName(fPath[1], 
+                                           ext = ".time", throwError = FALSE)$time))
+      }
+      if (!("MRK" %in% toupper(ext))) {
+        dsn <- c(dsn, list(MRK = getFName(fPath[1], ext = ".mrk", 
+                                          throwError = FALSE)$mrk))
+      }
+    }
+    hd <- verboseF(readIPRH(dsn[["IPRH"]]), verbose = verbose)
+    iprb <- verboseF(readIPRB(dsn[["IPRB"]], ntr = hd$ntr, 
+                              npt = hd$npt, nbytes = hd$nbytes), verbose = verbose)
+    iprball <- list(hd = hd$HD, data = iprb)
+    if (!is.null(dsn[["TIME"]])) {
+      iprball <- c(iprball, list(time = readTIME(dsn[["TIME"]])))
+    }
+    if (!is.null(dsn[["MRK"]])) {
+      iprball <- c(iprball, list(mrk = readMRK(dsn[["MRK"]])))
+    }
+    x <- verboseF(.gprImpulseRadar(iprball, fName = fName[["IPRB"]], 
+                                   fPath = fPath[["IPRB"]], desc = desc, Vmax = Vmax), 
+                  verbose = verbose)
+    if (!is.null(dsn[["COR"]]) && isTRUE(interp_pos)) {
+      x <- tryCatch({
+        x_cor <- verboseF(readIPRCOR(dsn[["COR"]]), verbose = verbose)
+        x <- interpPos(x, x_cor, tol = sqrt(.Machine$double.eps), 
+                       method = method)
+        if (toUTM == TRUE) {
+          warning("Option 'toUTM' not yet implemented!")
+        }
+        x
+      }, error = function(cond) {
+        message("I could neither read your GPS data ", 
+                "nor interpolate the trace position.")
+        return(x)
+      })
+    }
+  }
+  else if ("DZT" %in% toupper(ext)) {
+    if (length(dsn) == 1) {
+      dsn <- list(DZT = dsn[["DZT"]], DZX = getFName(fPath[1], 
+                                                     ext = ".DZX", throwError = FALSE)$dzx, DZG = getFName(fPath[1], 
+                                                                                                           ext = ".DZG", throwError = FALSE)$dzg)
+    }
+    else {
+      if (!("DZX" %in% toupper(ext))) {
+        dsn <- c(dsn, list(DZX = getFName(fPath[1], ext = ".DZX", 
+                                          throwError = FALSE)$dzx))
+      }
+      if (!("DZG" %in% toupper(ext))) {
+        dsn <- c(dsn, list(DZG = getFName(fPath[1], ext = ".DZG", 
+                                          throwError = FALSE)$dzg))
+      }
+    }
+    dzt <- verboseF(readDZT(dsn[["DZT"]]), verbose = verbose)
+    if (!is.null(dsn[["DZX"]])) {
+      dzx <- verboseF(readDZX(dsn[["DZX"]]), verbose = verbose)
+      dzt <- c(dzt, list(dzx = dzx))
+    }
+    x <- verboseF(.gprDZT(dzt, fName = fName[["DZT"]], fPath = fPath[["DZT"]], 
+                          desc = desc, Vmax = Vmax, ch = ch), verbose = verbose)
+    if (!is.null(dsn[["DZG"]]) && isTRUE(interp_pos)) {
+      x <- tryCatch({
+        gps <- verboseF(readDZG(dsn[["DZG"]], toUTM = toUTM), 
+                        verbose = verbose)
+        x <- interpPos(x, gps$mrk, tol = sqrt(.Machine$double.eps), 
+                       method = method)
+        crs(x) <- gps$crs
+        x
+      }, error = function(cond) {
+        message("I could neither read your GPS data ", 
+                "nor interpolate the trace position.")
+        return(x)
+      })
+    }
+  }
+  else if ("VOL" %in% toupper(ext)) {
+    A <- verboseF(readVOL(dsn$VOL), verbose = verbose)
+    x <- verboseF(.gprVOL(A, fName = fName, fPath = fPath, 
+                          desc = desc, Vmax = Vmax), verbose = verbose)
+    if (A$hd$dim == "3D") {
+      warning("return a 'GPRcube' object with complex numbers.", 
+              " Current processing and plotting functions will most likely not ", 
+              "work on the returned object. Please contact me:\n", 
+              "emanuel.huber@pm.me")
+    }
+    else {
+      warning("Still experimental. Don't hesitate to contact me:\n", 
+              "emanuel.huber@pm.me")
+    }
+    return(x)
+  }
+  else if ("DAT" %in% toupper(ext)) {
+    if (length(dsn) == 1) {
+      if (inherits(dsn, "connection")) {
+        stop("Please add an additional connection to 'dsn' in 'readGPR()' for ", 
+             "the header file '*.hdr'")
+      }
+      dsn <- list(DAT = getFName(fPath[1], ext = ".DAT")$dat, 
+                  HDR = getFName(fPath[1], ext = ".HDR")$hdr, GPS = getFName(fPath[1], 
+                                                                             ext = ".GPS", throwError = FALSE)$gps, GPT = getFName(fPath[1], 
+                                                                                                                                   ext = ".GPT", throwError = FALSE)$gpt)
+    }
+    else if (!("HDR" %in% toupper(ext))) {
+      stop("Missing connection or filepath to '*.hdr' file.")
+    }
+    else {
+      dsn <- list(DAT = dsn[["DAT"]], HDR = dsn[["HDR"]])
+      if (!("GPS" %in% toupper(ext))) {
+        dsn <- c(dsn, list(GPS = getFName(fPath[1], ext = ".GPS", 
+                                          throwError = FALSE)$gps))
+      }
+      if (!("GPT" %in% toupper(ext))) {
+        dsn <- c(dsn, list(GPT = getFName(fPath[1], ext = ".GPT", 
+                                          throwError = FALSE)$gpt))
+      }
+    }
+    hd <- readUtsiHDR(dsn[["HDR"]])
+    z <- readUtsiDat(dsn[["DAT"]], splPerScan = hd$splPerScan, 
+                     bits = hd$bits)
+    x <- verboseF(.gprUtsi(c(z, list(hd = hd)), fName = fName[["DAT"]], 
+                           fPath = fPath[["DAT"]], desc = desc, Vmax = Vmax), 
+                  verbose = verbose)
+    if (!is.null(dsn[["GPS"]]) && !is.null(dsn[["GPT"]]) && 
+        isTRUE(interp_pos)) {
+      x <- tryCatch({
+        gpt <- verboseF(readUtsiGPT(dsn[["GPT"]]), verbose = verbose)
+        if (length(gpt) > 0) {
+          x_cor <- verboseF(readUtsiGPS(dsn[["GPS"]], 
+                                        gpt), verbose = verbose)
+          x <- interpPos(x, x_cor, tol = sqrt(.Machine$double.eps), 
+                         method = method)
+          if (toUTM == TRUE) {
+            warning("Option 'toUTM' not yet implemented!")
+          }
+          x
+        }
+        else {
+          x
+        }
+      }, error = function(cond) {
+        message("I could neither read your GPS data ", 
+                "nor interpolate the trace position.")
+        return(x)
+      })
+    }
+  }
+  else if ("OUT" %in% toupper(ext)) {
+    x <- verboseF(readOUT(dsn[["OUT"]]), verbose = verbose)
+  }
+  else if ("TXT" %in% toupper(ext)) {
+    A <- verboseF(readTXT(dsn[["TXT"]]), verbose = verbose)
+    x <- verboseF(.gprTXT(A, fName = fName, fPath = fPath, 
+                          desc = desc, Vmax = Vmax), verbose = verbose)
+  }
+  else if ("RDS" %in% toupper(ext)) {
+    x <- verboseF(readRDS(dsn[["RDS"]]), verbose = verbose)
+    if (class(x) == "GPR") {
+      x@filepath <- fPath
+    }
+    else if (class(x) == "list") {
+      versRGPR <- x[["version"]]
+      if (versRGPR == "0.1") {
+        if (!is.null(x[["delineations"]])) {
+          if (ncol(x[["delineations"]][[1]]) >= 5) {
+            for (i in seq_along(x[["delineations"]])) {
+              x[["delineations"]][[i]][, 5] <- -x[["delineations"]][[i]][, 
+                                                                         5]
+            }
+          }
+        }
+      }
+      y <- new("GPR", version = x[["version"]], data = x[["data"]], 
+               traces = x[["traces"]], depth = x[["depth"]], 
+               pos = x[["pos"]], time0 = x[["time0"]], time = x[["time"]], 
+               fid = trimStr(x[["fid"]]), ann = trimStr(x[["ann"]]), 
+               coord = x[["coord"]], rec = x[["rec"]], trans = x[["trans"]], 
+               coordref = x[["coordref"]], freq = x[["freq"]], 
+               dz = x[["dz"]], dx = x[["dx"]], antsep = x[["antsep"]], 
+               name = x[["name"]], description = x[["description"]], 
+               filepath = x[["filepath"]], depthunit = x[["depthunit"]], 
+               posunit = x[["posunit"]], surveymode = x[["surveymode"]], 
+               date = x[["date"]], crs = x[["crs"]], proc = x[["proc"]], 
+               vel = x[["vel"]], delineations = x[["delineations"]], 
+               hd = x[["hd"]])
+      y@filepath <- fPath
+      return(y)
+    }
+  }
+  else {
+    stop(paste0("File extension not recognised!\n", "Must be '.dt1', '.dzt', '.rd3', '.sgy', '.segy', '.rds'\n", 
+                "'.iprb', '.iprh', '.dat', '.sgpr', '.dt', '.vol', '.seg2'\n", 
+                "'.sg2', '.out'."))
+  }
+  if (grepl("CMP", x@surveymode)) {
+    x@surveymode <- "CMP"
+    if (length(x@antsep) == 1) {
+      if (length(x@rec) == 0 || length(x@trans) == 0) {
+        x@antsep <- seq(x@antsep, by = x@dx, length.out = length(x))
+      }
+      else {
+        x@antsep <- sqrt(colSums((x@rec - x@trans)^2))
+      }
+    }
+  }
+  if (any(is.na(x@data))) {
+    x@data <- apply(x@data, 2, fillNAprevious)
+  }
+  if (grepl("meter", posunit(x)) || grepl("metre", posunit(x))) {
+    posunit(x) <- "m"
+  }
+  return(x)
+}
+```
+
+# Load Individual Grid File Paths 
+
+This analysis used the 500 MHz (.RAD) channel. You can switch to the 350 (.RA2) or 250 (.RA1) channels by adjusting the file paths. Replace .RAD with .RA1 or .RA2 as needed. 
+
+```{r}
+#edit the file path depending on where you saved Laja_GPR_raw
+G1 <- file.path("D:/Laja_G1/Lgy_g1", paste0("Multi-01_LINE", sprintf("%03d", 1:19), ".RAD"))
+G2 <- file.path("D:/Laja_G2/Lgy_g2", paste0("Multi-01_LINE", sprintf("%03d", 1:20), ".RAD"))
+G3 <- file.path("D:/Laja_G3/Lgy_g3", paste0("Multi-01_LINE", sprintf("%03d", 1:20), ".RAD"))
+G4 <- file.path("D:/Laja_G4/Lgy_g4", paste0("Multi-01_LINE", sprintf("%03d", 1:19), ".RAD"))
+G5 <- file.path("D:/Laja_G5/Lgy_g5", paste0("Multi-01_LINE", sprintf("%03d", 1:20), ".RAD"))
+G6 <- file.path("D:/Laja_G6/Lgy_g6", paste0("Multi-01_LINE", sprintf("%03d", 1:20), ".RAD"))
+G7 <- file.path("D:/Laja_G7/Lgy_g7", paste0("Multi-01_LINE", sprintf("%03d", 1:20), ".RAD"))
+G8 <- file.path("D:/Laja_G8/Lgy_g8", paste0("Multi-01_LINE", sprintf("%03d", 1:20), ".RAD"))
+G9 <- file.path("D:/Laja_G9/Lgy_g9", paste0("Multi-01_LINE", sprintf("%03d", 1:20), ".RAD"))
+G10 <- file.path("D:/Laja_G10/Lgy_g10", paste0("Multi-01_LINE", sprintf("%03d", 1:20), ".RAD"))
+G11 <- file.path("D:/Laja_G11/Lgy_g11", paste0("Multi-01_LINE", sprintf("%03d", 1:20), ".RAD"))
+G12 <- file.path("D:/Laja_G12/Lgy_g12", paste0("Multi-01_LINE", sprintf("%03d", 1:20), ".RAD"))
+G13 <- file.path("D:/Laja_G13/Lgy_g13", paste0("Multi-01_LINE", sprintf("%03d", 1:20), ".RAD"))
+G14 <- file.path("D:/Laja_G14/Lgy_g14", paste0("Multi-01_LINE", sprintf("%03d", 1:20), ".RAD"))
+G15 <- file.path("D:/Laja_G15/Lgy_g15", paste0("Multi-01_LINE", sprintf("%03d", 1:20), ".RAD"))
+```
+
+# Visualize Individual Transect Profiles
+To plot individual transect profiles, select Grid and index the specific transect line. See below examples. 
+```{r}
+#plot the first transect of Grid 1:
+  plot(readGPR(G1[1]))
+  plot(readGPR_BMF(G1[1]))
+```
+
+```{r}
+#Plot Grid 7 Line 7 - potential House Floor 
+  plot(readGPR(G7[7]))
+  plot(readGPR_BMF(G7[7]))
+```
+
+```{r}
+#Plot Grid 12 Line 15 - potential pit-like feature 
+  plot(readGPR(G12[15]))
+  plot(readGPR_BMF(G12[15]))
+```
+
+# Interpolating Individual Grids 
+Coordinates have been assigned to each grid to account for lines starting early and corrected wheel calibration.
+
+To plot specific depths of the GPRcube objects (SXY_G#), index the depth in nanoseconds 
+    (0.15*index value)-0.15 = depth in ns
+All the interpolations are automatically set to 5.85 nanoseconds (index value of 40) to correspond with primary depth analyzed in the associated publication. 
+
+## G1
+```{r, message=FALSE, warning=FALSE}
+SU_G1 <- GPRsurvey_BMF(G1, verbose = FALSE)
+  G1_length <- SU_G1@lengths
+```
+
+```{r G1 - Assign Coordinates}
+setGridCoord(SU_G1) <- list(xlines = 1:14, 
+                          xpos = seq(0.5, by =  0.5, length.out = 14),
+                          xstart = rep(0, 14), 
+                          xlength = G1_length[1:14])
+setGridCoord(SU_G1) <- list(xlines = 15,
+                          xpos = 7.5, 
+                          xstart = 3.18, 
+                          xlength = G1_length[15]+3.18)
+setGridCoord(SU_G1) <- list(xlines = 16:19,
+                          xpos = seq(8, by = 0.5, length.out = 4),  
+                          xstart = rep(0, 4), 
+                          xlength = G1_length[16:19])
+plot(SU_G1, asp = T, parFid = NULL)
+```
+
+```{r G1 - Interpolation, fig.width=4, fig.height=5}
+SXY_G1 <- interpSlices(SU_G1, dx = 0.025, dy = 0.025, dz = 0.15, h = 6)
+
+plot(SXY_G1[,,40], col = palGPR("grey"))
+```
+
+## G2
+```{r, message=FALSE, warning=FALSE}
+SU_G2 <- GPRsurvey_BMF(G2, verbose = FALSE)
+  G2_length <- SU_G2@lengths
+```
+  
+```{r G2 - Assign Coordinates}
+setGridCoord(SU_G2) <- list(xlines = seq_along(SU_G2), 
+                          xpos = seq(0, by =  0.5, length.out = length(SU_G2)),
+                          xstart = rep(0, length(SU_G2)), 
+                          xlength = G2_length)
+
+plot(SU_G2, asp = T, parFid = NULL)
+```
+
+```{r G2 - Interpolation, fig.width=4, fig.height=4.75}
+SXY_G2 <- interpSlices(SU_G2, dx = 0.025, dy = 0.025, dz = 0.15, h = 6)
+
+plot(SXY_G2[,,40], col = palGPR("grey"))
+```
+
+## G3
+```{r, message=FALSE, warning=FALSE}
+SU_G3 <- GPRsurvey_BMF(G3, verbose = FALSE)
+  G3_length <- SU_G3@lengths
+```
+
+```{r G3 - Assign Coordinates}
+setGridCoord(SU_G3) <- list(xlines = seq_along(SU_G3), 
+                          xpos = seq(0, by =  0.5, length.out = length(SU_G3)),
+                          xstart = rep(0, length(SU_G3)), 
+                          xlength = G3_length)
+
+plot(SU_G3, asp = T, parFid = NULL)
+```
+
+```{r G3 - Interpolation, fig.width=4, fig.height=4.75}
+SXY_G3 <- interpSlices(SU_G3, dx = 0.025, dy = 0.025, dz = 0.15, h = 6)
+
+plot(SXY_G3[,,40], col = palGPR("grey"))
+```
+
+
+## G4
+```{r, message=FALSE, warning=FALSE}
+SU_G4 <- GPRsurvey_BMF(G4, verbose = FALSE)
+  G4_length <- SU_G4@lengths
+```
+
+```{r G4 - Assign Coordinates}
+setGridCoord(SU_G4) <- list(xlines = seq_along(SU_G4), 
+                          xpos = seq(0, by =  0.5, length.out = length(SU_G4)),
+                          xstart = rep(0, length(SU_G4)), 
+                          xlength = G4_length)
+
+plot(SU_G4, asp = T, parFid = NULL)
+```
+
+```{r G4 - Interpolation, fig.width=4, fig.height=5}
+SXY_G4 <- interpSlices(SU_G4, dx = 0.025, dy = 0.025, dz = 0.15, h = 6)
+
+plot(SXY_G4[,,40], col = palGPR("grey"))
+```
+
+## G5
+```{r, message=FALSE, warning=FALSE}
+SU_G5 <- GPRsurvey_BMF(G5, verbose = FALSE)
+  G5_length <- SU_G5@lengths
+```
+
+```{r G5 - Assign Coordinates}
+setGridCoord(SU_G5) <- list(xlines = 1:2, 
+                          xpos = seq(0, by = 0.5, length.out = 2), 
+                          xstart = rep(0, 2), 
+                          xlength = G5_length[1:2]) 
+setGridCoord(SU_G5) <- list(xlines = 3:7,
+                          xpos = seq(1, by = 0.5, length.out = 5),
+                          xstart = rep(4.3, 5), 
+                          xlength = G5_length[3:7]+4.3) 
+setGridCoord(SU_G5) <- list(xlines = 8,
+                          xpos = 3.5,
+                          xstart = 3.75, 
+                          xlength = G5_length[8]+3.75) 
+setGridCoord(SU_G5) <- list(xlines = 9,
+                          xpos = 4,
+                          xstart = 1.28, 
+                          xlength = G5_length[9]+1.28)  
+setGridCoord(SU_G5) <- list(xlines = 10, 
+                          xpos = 4.5,
+                          xstart = 0, 
+                          xlength = G5_length[10])  
+setGridCoord(SU_G5) <- list(xlines = 11:12,
+                          xpos = seq(5, by = 0.5, length.out = 2), 
+                          xstart = rep(0.8, 2), 
+                          xlength = G5_length[11:12]+0.8)
+setGridCoord(SU_G5) <- list(xlines = 13:20, 
+                          xpos = seq(6, by = 0.5, length.out = 8), 
+                          xstart = rep(0, 8), 
+                          xlength = G5_length[13:20]) 
+
+plot(SU_G5, asp = T, parFid = NULL)
+```
+
+```{r G5 - Interpolation, fig.width=4, fig.height=4.75}
+SXY_G5 <- interpSlices(SU_G5, dx = 0.025, dy = 0.025, dz = 0.15, h = 6)
+
+plot(SXY_G5[,,40], col = palGPR("grey"))
+```
+
+## G6 
+```{r, message=FALSE, warning=FALSE}
+SU_G6 <- GPRsurvey_BMF(G6, verbose = FALSE)
+  G6_length <- SU_G6@lengths
+```
+
+```{r G6 - Assign Coordinates}
+setGridCoord(SU_G6) <- list(xlines = seq_along(SU_G6), 
+                          xpos = seq(0, by =  0.5, length.out = length(SU_G6)),
+                          xstart = rep(0, length(SU_G6)), 
+                          xlength = G6_length)
+
+plot(SU_G6, asp = T, parFid = NULL)
+```
+
+```{r G6 - Interpolation, fig.width=4, fig.height=4.75}
+SXY_G6 <- interpSlices(SU_G6, dx = 0.025, dy = 0.025, dz = 0.15, h = 6)
+
+plot(SXY_G6[,,40], col = palGPR("grey"))
+```
+
+## G7
+```{r, message=FALSE, warning=FALSE}
+SU_G7 <- GPRsurvey_BMF(G7, verbose = FALSE)
+  G7_length <- SU_G7@lengths
+```
+
+```{r G7 - Assign Coordinates}
+setGridCoord(SU_G7) <- list(xlines = seq_along(SU_G7), 
+                          xpos = seq(0, by =  0.5, length.out = length(SU_G7)),
+                          xstart = rep(0, length(SU_G7)), 
+                          xlength = G7_length)
+
+plot(SU_G7, asp = T, parFid = NULL)
+```
+
+```{r G7 - Interpolation, fig.width=4, fig.height=5}
+SXY_G7 <- interpSlices(SU_G7, dx = 0.025, dy = 0.025, dz = 0.15, h = 6)
+
+plot(SXY_G7[,,40], col = palGPR("grey"))
+```
+
+## G8
+```{r, message=FALSE, warning=FALSE}
+SU_G8 <- GPRsurvey_BMF(G8, verbose = FALSE)
+  G8_length <- SU_G8@lengths
+```
+
+```{r G8 - Assign Coordinates}
+setGridCoord(SU_G8) <- list(xlines = 1, 
+                          xpos = 0,
+                          xstart = 0, 
+                          xlength = G8_length[1])
+setGridCoord(SU_G8) <- list(xlines = 2:5, 
+                          xpos = seq(.5, by =  0.5, length.out = 4),
+                          xstart = rep(1, 4), 
+                          xlength = G8_length[2:5]+1)
+setGridCoord(SU_G8) <- list(xlines = 6:20, 
+                          xpos = seq(2.5, by = .5, length.out = 15),
+                          xstart = rep(0, 15), 
+                          xlength = G8_length[6:20])
+
+plot(SU_G8, asp = T, parFid = NULL)
+```
+
+```{r G8 - Interpolation, fig.width=4, fig.height=5}
+SXY_G8 <- interpSlices(SU_G8, dx = 0.025, dy = 0.025, dz = 0.15, h = 6)
+
+plot(SXY_G8[,,40], col = palGPR("grey"))
+```
+
+## G9
+```{r, message=FALSE, warning=FALSE}
+SU_G9 <- GPRsurvey_BMF(G9, verbose = FALSE)
+  G9_length <- SU_G9@lengths
+```
+
+```{r G9 - Assign Coordinates}
+setGridCoord(SU_G9) <- list(xlines = seq_along(SU_G9), 
+                          xpos = seq(0, by =  0.5, length.out = length(SU_G9)),
+                          xstart = rep(0, length(SU_G9)), 
+                          xlength = G9_length)
+
+plot(SU_G9, asp = T, parFid = NULL)
+```
+
+```{r G9 - Interpolation, fig.width=4, fig.height=5}
+SXY_G9 <- interpSlices(SU_G9, dx = 0.025, dy = 0.025, dz = 0.15, h = 6)
+
+plot(SXY_G9[,,40], col = palGPR("grey"))
+```
+
+## G10 
+```{r, message=FALSE, warning=FALSE}
+SU_G10 <- GPRsurvey_BMF(G10, verbose = FALSE)
+  G10_length <- SU_G10@lengths
+```
+
+```{r G10 - Assign Coordinates}
+setGridCoord(SU_G10) <- list(xlines = 1:5, 
+                          xpos = seq(0, by = 0.5, length.out = 5), 
+                          xstart = rep(0, 5), 
+                          xlength = G10_length[1:5]) 
+setGridCoord(SU_G10) <- list(xlines = 6,
+                          xpos = 2.5,
+                          xstart = 0.8, 
+                          xlength = G10_length[6]+0.8) 
+setGridCoord(SU_G10) <- list(xlines = 7:20, 
+                          xpos = seq(3, by = 0.5, length.out = 14), 
+                          xstart = rep(0, 14), 
+                          xlength = G10_length[7:20])  
+
+plot(SU_G10, asp = T, parFid = NULL)
+```
+
+```{r G10 - Interpolation, fig.width=4, fig.height=5}
+SXY_G10 <- interpSlices(SU_G10, dx = 0.025, dy = 0.025, dz = 0.15, h = 6)
+
+plot(SXY_G10[,,40], col = palGPR("grey"))
+```
+
+## G11
+```{r, message=FALSE, warning=FALSE}
+SU_G11 <- GPRsurvey_BMF(G11, verbose = FALSE)
+  G11_length <- SU_G11@lengths
+```
+
+```{r G11 - Assign Coordinates}
+setGridCoord(SU_G11) <- list(xlines = seq_along(SU_G11), 
+                          xpos = seq(0, by =  0.5, length.out = length(SU_G11)),
+                          xstart = rep(0, 20), 
+                          xlength = G11_length)
+
+plot(SU_G11, asp = T, parFid = NULL)
+```
+
+```{r G11 - Interpolation, fig.width=4, fig.height=6.5}
+SXY_G11 <- interpSlices(SU_G11, dx = 0.025, dy = 0.025, dz = 0.15, h = 6)
+
+plot(SXY_G11[,,40], col = palGPR("grey"))
+```
+
+## G12
+```{r, message=FALSE, warning=FALSE}
+SU_G12 <- GPRsurvey_BMF(G12, verbose = FALSE)
+  G12_length <- SU_G12@lengths
+```
+
+```{r G12 - Assign Coordinates}
+setGridCoord(SU_G12) <- list(xlines = 1:13, 
+                          xpos = seq(0, by =  0.5, length.out = 13),
+                          xstart = rep(0, 13),
+                          xlength = G12_length[1:13])
+setGridCoord(SU_G12) <- list(xlines = 14:15,
+                          xpos = seq(6.5, by =  0.5, length.out = 2),
+                          xstart = rep(3, 2), 
+                          xlength = G12_length[14:15]+3)
+setGridCoord(SU_G12) <- list(xlines = 16:20,
+                          xpos = seq(7.5, by =  0.5, length.out = 5),
+                          xstart = rep(0, 5), 
+                          xlength = G12_length[16:20])
+
+plot(SU_G12, asp = T, parFid = NULL)
+```
+
+```{r G12 - Interpolation, fig.width=4, fig.height=6.75}
+SXY_G12 <- interpSlices(SU_G12, dx = 0.025, dy = 0.025, dz = 0.15, h = 6)
+
+plot(SXY_G12[,,40], col = palGPR("grey"))
+```
+
+## G13
+```{r, message=FALSE, warning=FALSE}
+SU_G13 <- GPRsurvey_BMF(G13, verbose = FALSE)
+  G13_length <- SU_G13@lengths
+```
+
+```{r G13 - Assign Coordinates}
+setGridCoord(SU_G13) <- list(xlines = seq_along(SU_G13), 
+                          xpos = seq(0, by =  0.5, length.out = length(SU_G13)),
+                          xstart = rep(0, length(SU_G13)),
+                          xlength = G13_length)
+
+plot(SU_G13, asp = T, parFid = NULL)
+```
+
+```{r G13 - Interpolation, fig.width=4, fig.height=7.5}
+SXY_G13 <- interpSlices(SU_G13, dx = 0.025, dy = 0.025, dz = 0.15, h = 6)
+
+plot(SXY_G13[,,40], col = palGPR("grey"))
+```
+
+## G14
+```{r, message=FALSE, warning=FALSE}
+SU_G14 <- GPRsurvey_BMF(G14, verbose = FALSE)
+  G14_length <- SU_G14@lengths
+```
+
+```{r G14 - Assign Coordinates}
+ setGridCoord(SU_G14) <- list(xlines = 1:3, 
+                          xpos = seq(0, by = 0.5, length.out = 3),
+                          xstart = rep(4, 3), 
+                          xlength = G14_length[1:3]+4)
+setGridCoord(SU_G14) <- list(xlines = 4:17, 
+                          xpos = seq(1.5, by =  0.5, length.out = 14),
+                          xstart = rep(0, 14), 
+                          xlength = G14_length[4:17])
+setGridCoord(SU_G14) <- list(xlines = 18:20, 
+                          xpos = seq(8.5, by = .5, length.out = 3),
+                          xstart = rep(4, 3), 
+                          xlength = G14_length[18:20]+4)
+
+plot(SU_G14, asp = T, parFid = NULL)
+```
+
+```{r G14 - Interpolation, fig.width=4, fig.height=7.5}
+SXY_G14 <- interpSlices(SU_G14, dx = 0.025, dy = 0.025, dz = 0.15, h = 6)
+
+plot(SXY_G14[,,40], col = palGPR("grey"))
+```
+
+## G15
+```{r, message=FALSE, warning=FALSE}
+SU_G15 <- GPRsurvey_BMF(G15, verbose = FALSE)
+  G15_length <- SU_G15@lengths
+```
+
+```{r G15 - Assign Coordinates}
+setGridCoord(SU_G15) <- list(xlines = seq_along(SU_G15), 
+                          xpos = seq(0, by =  0.5, length.out = length(SU_G15)),
+                          xstart = rep(0, length(SU_G15)), 
+                          xlength = G15_length)
+
+plot(SU_G15, asp = T, parFid = NULL)
+```
+
+
+```{r G15 - Interpolation, fig.width=4, fig.height=6}
+SXY_G15 <- interpSlices(SU_G15, dx = 0.025, dy = 0.025, dz = 0.15, h = 6)
+
+plot(SXY_G15[,,40], col = palGPR("grey"))
+```
+
+
+# Interpolating Merged Grids 
+
+## G1, 6, 11
+```{r, message=FALSE, warning=FALSE}
+G1.6.11 <- c(G1, G6, G11)
+SU_G1.6.11 <- GPRsurvey_BMF(G1.6.11, verbose = FALSE)
+  G1.6.11_lengths <- c(SU_G1@lengths, SU_G6@lengths, SU_G11@lengths)
+```
+
+```{r G1.6.11 - Assign Coordinates}
+setGridCoord(SU_G1.6.11) <- list(xlines = 1:14, 
+                          xpos = seq(0.5, by =  0.5, length.out = 14),
+                          xstart = rep(0, 14), 
+                          xlength = G1.6.11_lengths[1:14]) 
+setGridCoord(SU_G1.6.11) <- list(xlines = 15, #line 15 of G1
+                          xpos = 7.5, 
+                          xstart = 3.18,
+                          xlength = G1.6.11_lengths[15]+3.18)
+setGridCoord(SU_G1.6.11) <- list(xlines = 16:19, 
+                          xpos = seq(8, by = 0.5, length.out = 4), 
+                          xstart = rep(0, 4), 
+                          xlength = G1.6.11_lengths[16:19])
+setGridCoord(SU_G1.6.11) <- list(xlines = 20:39, 
+                          xpos = seq(0, by = 0.5, length.out = 20), 
+                          xstart = rep(10, 20), 
+                          xlength = G1.6.11_lengths[20:39]+10)
+setGridCoord(SU_G1.6.11) <- list(xlines = 40:59, 
+                          xpos = seq(0, by = 0.5, length.out = 20), 
+                          xstart = rep(20, 20), 
+                          xlength = G1.6.11_lengths[40:59]+20)
+
+plot(SU_G1.6.11, asp = T, parFid = NULL)
+```
+
+```{r G1.6.11 - Interpolation, fig.width=2.5, fig.height=6}
+SXY_G1.6.11 <- interpSlices(SU_G1.6.11, dx = 0.1, dy = 0.1, dz = 0.15, h = 6)
+
+plot(SXY_G1.6.11[,,40], col = palGPR("grey"))
+```
+
+## G2, 7, 12
+```{r, message=FALSE, warning=FALSE}
+G2.7.12 <- c(G2, G7, G12)
+SU_G2.7.12 <- GPRsurvey_BMF(G2.7.12, verbose = FALSE)
+  G2.7.12_lengths <- c(SU_G2@lengths, SU_G7@lengths, SU_G12@lengths)
+```
+
+```{r G2.7.12 - Assign Coordinates}
+setGridCoord(SU_G2.7.12) <- list(xlines = 1:20, 
+                          xpos = seq(0, by =  0.5, length.out = 20),
+                          xstart = rep(0, 20), 
+                          xlength = G2.7.12_lengths[1:20])
+setGridCoord(SU_G2.7.12) <- list(xlines = 21:40, 
+                          xpos = seq(0, by =  0.5, length.out = 20),
+                          xstart = rep(10, 20), 
+                          xlength = G2.7.12_lengths[21:40]+10)
+setGridCoord(SU_G2.7.12) <- list(xlines = 41:53, 
+                          xpos = seq(0, by =  0.5, length.out = 13),
+                          xstart = rep(20, 13), 
+                          xlength = G2.7.12_lengths[41:53]+20)
+setGridCoord(SU_G2.7.12) <- list(xlines = 54:55, #lines 14 and 15 of G12
+                          xpos = seq(6.5, by =  0.5, length.out = 2),
+                          xstart = rep(24, 2), 
+                          xlength = G2.7.12_lengths[54:55]+24)
+setGridCoord(SU_G2.7.12) <- list(xlines = 56:60, 
+                          xpos = seq(7.5, by =  0.5, length.out = 5),
+                          xstart = rep(20, 5), 
+                          xlength = G2.7.12_lengths[56:60]+20)
+
+plot(SU_G2.7.12, asp = T, parFid = NULL)
+```
+
+```{r G2.7.12 - Interpolation, fig.width=2.5, fig.height=6}
+SXY_G2.7.12 <- interpSlices(SU_G2.7.12, dx = 0.05, dy = 0.05, dz = 0.15, h = 6)
+
+plot(SXY_G2.7.12[,,40], col = palGPR("grey"))
+```
+
+## G3, 8, 13
+```{r, message=FALSE, warning=FALSE}
+G3.8.13 <- c(G3, G8, G13)
+SU_G3.8.13 <- GPRsurvey_BMF(G3.8.13, verbose = FALSE)
+  G3.8.13_lengths <- c(SU_G3@lengths, SU_G8@lengths, SU_G13@lengths)
+```
+
+```{r G3.8.13 - Assign Coordinates}
+setGridCoord(SU_G3.8.13) <- list(xlines = 1:20, 
+                          xpos = seq(0, by = 0.5, length.out = 20), 
+                          xstart = rep(0, 20), 
+                          xlength = G3.8.13_lengths[1:20]) 
+setGridCoord(SU_G3.8.13) <- list(xlines = 21, 
+                          xpos = 0, 
+                          xstart = 10, 
+                          xlength = G3.8.13_lengths[21]+10)
+setGridCoord(SU_G3.8.13) <- list(xlines = 22:25, 
+                          xpos = seq(.5, by = 0.5, length.out = 4), 
+                          xstart = rep(11, 4), 
+                          xlength = G3.8.13_lengths[22:25]+11)
+setGridCoord(SU_G3.8.13) <- list(xlines = 26:40, 
+                          xpos = seq(2.5, by = 0.5, length.out = 15), 
+                          xstart = rep(10, 15), 
+                          xlength = G3.8.13_lengths[26:40]+10) 
+setGridCoord(SU_G3.8.13) <- list(xlines = 41:60, 
+                          xpos = seq(0, by = 0.5, length.out = 20), 
+                          xstart = rep(20, 20), 
+                          xlength = G3.8.13_lengths[41:60]+20)
+
+plot(SU_G3.8.13, asp = T, parFid = NULL)
+```
+
+```{r G3.8.13 - Interpolation, fig.width=2.5, fig.height=6.25}
+SXY_G3.8.13 <- interpSlices(SU_G3.8.13, dx = 0.1, dy = 0.1, dz = 0.15, h = 6)
+
+plot(SXY_G3.8.13[,,40], col = palGPR("grey"))
+```
+
+## G4, 9, 14
+```{r, message=FALSE, warning=FALSE}
+G4.9.14 <- c(G4, G9, G14)
+SU_G4.9.14 <- GPRsurvey_BMF(G4.9.14, verbose = FALSE)
+  G4.9.14_lengths <- c(SU_G4@lengths, SU_G9@lengths, SU_G14@lengths)
+```
+
+```{r G4.9.14 - Assign Coordinates}
+setGridCoord(SU_G4.9.14) <- list(xlines = 1:19, 
+                          xpos = seq(0, by =  0.5, length.out = 19),
+                          xstart = rep(0, 19), 
+                          xlength = G4.9.14_lengths[1:19])
+setGridCoord(SU_G4.9.14) <- list(xlines = 20:39, 
+                          xpos = seq(0, by =  0.5, length.out = 20),
+                          xstart = rep(10, 20), 
+                          xlength = G4.9.14_lengths[20:39]+10)
+setGridCoord(SU_G4.9.14) <- list(xlines = 40:42, 
+                          xpos = seq(0, by = 0.5, length.out = 3), 
+                          xstart = rep(24, 3), 
+                          xlength = G4.9.14_lengths[40:42]+24)
+setGridCoord(SU_G4.9.14) <- list(xlines = 43:56, 
+                          xpos = seq(1.5, by = 0.5, length.out = 14), 
+                          xstart = rep(20, 14), 
+                          xlength = G4.9.14_lengths[43:56]+20)
+setGridCoord(SU_G4.9.14) <- list(xlines = 57:59,
+                          xpos = seq(8.5, by = 0.5, length.out = 3), 
+                          xstart = rep(24, 3), 
+                          xlength = G4.9.14_lengths[57:59]+24)
+
+plot(SU_G4.9.14, asp = T, parFid = NULL)
+```
+
+```{r G4.9.14 - Interpolation, fig.width=2.5, fig.height=6.25}
+SXY_G4.9.14 <- interpSlices(SU_G4.9.14, dx = 0.1, dy = 0.1, dz = 0.15, h = 6)
+
+plot(SXY_G4.9.14[,,40], col = palGPR("grey1"))
+```
+
+## G5, 10, 15
+```{r, message=FALSE, warning=FALSE}
+G5.10.15 <- c(G5, G10, G15)
+SU_G5.10.15 <- GPRsurvey_BMF(G5.10.15, verbose = FALSE)
+  G5.10.15_lengths <- c(SU_G5@lengths, SU_G10@lengths, SU_G15@lengths)
+```
+
+```{r G5.10.15 - Assign Coordinates}
+setGridCoord(SU_G5.10.15) <- list(xlines = 1:2, 
+                          xpos = seq(0, by = 0.5, length.out = 2), 
+                          xstart = rep(0, 2), 
+                          xlength = G5.10.15_lengths[1:2]) 
+setGridCoord(SU_G5.10.15) <- list(xlines = 3:7, 
+                          xpos = seq(1, by = 0.5, length.out = 5), 
+                          xstart = rep(4.3, 5), 
+                          xlength = G5.10.15_lengths[3:7]+4.3) 
+setGridCoord(SU_G5.10.15) <- list(xlines = 8,
+                          xpos = 3.5,
+                          xstart = 3.75, 
+                          xlength = G5.10.15_lengths[8]+3.75)  
+setGridCoord(SU_G5.10.15) <- list(xlines = 9,
+                          xpos = 4, 
+                          xstart = 1.28, 
+                          xlength = G5.10.15_lengths[9]+1.28)   
+setGridCoord(SU_G5.10.15) <- list(xlines = 10, 
+                          xpos = 4.5,
+                          xstart = 0, 
+                          xlength = G5.10.15_lengths[10])  
+setGridCoord(SU_G5.10.15) <- list(xlines = 11:12,
+                          xpos = seq(5, by = 0.5, length.out = 2), 
+                          xstart = rep(0.8, 2), 
+                          xlength = G5.10.15_lengths[11:12]+0.8) 
+setGridCoord(SU_G5.10.15) <- list(xlines = 13:20,
+                          xpos = seq(6, by = 0.5, length.out = 8), 
+                          xstart = rep(0, 8), 
+                          xlength = G5.10.15_lengths[13:20])
+setGridCoord(SU_G5.10.15) <- list(xlines = 21:25, 
+                          xpos = seq(0, by = 0.5, length.out = 5), 
+                          xstart = rep(10, 5), 
+                          xlength = G5.10.15_lengths[21:25]+10)
+setGridCoord(SU_G5.10.15) <- list(xlines = 26,
+                          xpos = 2.5, 
+                          xstart = 10.8, 
+                          xlength = G5.10.15_lengths[26]+10.8) 
+setGridCoord(SU_G5.10.15) <- list(xlines = 27:40, 
+                          xpos = seq(3, by = 0.5, length.out = 14), 
+                          xstart = rep(10, 14), 
+                          xlength = G5.10.15_lengths[27:40]+10)
+setGridCoord(SU_G5.10.15) <- list(xlines = 41:60,
+                          xpos = seq(0, by = 0.5, length.out = 20), 
+                          xstart = rep(20, 20), 
+                          xlength = G5.10.15_lengths[41:60]+20)
+
+plot(SU_G5.10.15, asp = T, parFid = NULL)
+```
+
+```{r G5.10.15 - Interpolation, fig.width=2.5, fig.height=6}
+SXY_G5.10.15 <- interpSlices(SU_G5.10.15, dx = 0.1, dy = 0.1, dz = 0.15, h = 6)
+
+plot(SXY_G5.10.15[,,40], col = palGPR("grey1"))
+```
+
